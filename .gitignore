@@ -215,3 +215,4 @@ logs/*
 runnings/*
 .mp4
 logs/
+.vscode/settings.json

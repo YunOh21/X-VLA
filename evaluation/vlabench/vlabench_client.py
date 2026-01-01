@@ -25,21 +25,6 @@ from typing import Deque, Dict, Iterable, List, Optional, Tuple
 def quat_to_rotate6d(q: np.ndarray, scalar_first = False) -> np.ndarray:
     return R.from_quat(q, scalar_first = scalar_first).as_matrix()[..., :, :2].reshape(q.shape[:-1] + (6,))
 
-# def fix_pitch_positive(euler):
-#     roll = euler[..., 0]
-#     pitch = euler[..., 1]
-#     yaw = euler[..., 2]
-
-#     mask_flip = pitch < 0
-#     pitch[mask_flip] = -pitch[mask_flip]
-#     roll[mask_flip] = roll[mask_flip] + np.pi
-#     yaw[mask_flip] = yaw[mask_flip] + np.pi
-
-#     roll = (roll + np.pi) % (2 * np.pi) - np.pi
-#     yaw  = (yaw  + np.pi) % (2 * np.pi) - np.pi
-
-#     return np.stack([roll, pitch, yaw], axis=-1)
-
 def quat2euler(quat, is_degree=False):
     r = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
     euler_angles = r.as_euler('xyz', degrees=is_degree)  
@@ -65,12 +50,14 @@ class ClientModel():
     def __init__(self,
                  host,
                  port,
-                 control_mode = 'ee'):
+                 control_mode = 'ee',
+                 episode_config = None):
 
         self.url = f"http://{host}:{port}/act"
         assert control_mode in ['ee', 'joint']
         self.control_mode = control_mode
         self.name = 'hdp'
+        self.episode_config = episode_config
         self.reset()
         
     def reset(self):
@@ -107,6 +94,8 @@ class ClientModel():
         Returns:
             action: (np.array) predicted action
         """
+        episode_config = self.episode_config
+
         # print(self.action_plan)
         if not self.action_plan:
             multiview = obs['rgb']  # # np.ndarray with shape (4, 480, 480, 3)
@@ -123,9 +112,19 @@ class ClientModel():
             ee_state = np.concatenate([ee_pos, ee_6d, gripper], axis=0)
             proprio = np.concatenate([ee_state, np.zeros_like(ee_state)], axis=0).copy()
 
+            # for prefix
+            target_entity = episode_config['target_entity']
+            target_pos = next(
+                comp["position"]
+                for comp in episode_config["components"]
+                if comp["name"] == target_entity
+            )
+
+            prefix = f"The target object is located at {target_pos}. Move near the target object. "            
+
             query = {
                 "proprio": json_numpy.dumps(proprio),
-                "language_instruction": obs['instruction'],
+                "language_instruction": prefix + obs['instruction'],
                 "image0": json_numpy.dumps(main_view),
                 "image1": json_numpy.dumps(front_view),
                 "image2": json_numpy.dumps(wrist_view),
@@ -194,8 +193,7 @@ def evaluate(args):
             metrics=args.metrics
         )
 
-        policy = ClientModel(host=kwargs['host'], port=kwargs['port'])
-        # policy = RandomPolicy(None)
+        policy = ClientModel(host=kwargs['host'], port=kwargs['port'], episode_config=episode_config)
 
         result = evaluator.evaluate(policy)
         
