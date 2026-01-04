@@ -148,22 +148,17 @@ class XVLA(PreTrainedModel):
         
         result = {"vlm_features": enc_out, "aux_visual_inputs": aux_visual_inputs}
 
-        # attention
-        # Shape: (Batch, Num_Heads, Seq_Len, Seq_Len)
-        last_attn = enc_out_obj.attentions[-1]
-        
-        # avg: (Batch, Seq_Len, Seq_Len)
-        avg_attn = last_attn.mean(dim=1) 
-        
+        last_attn = enc_out_obj.attentions[-1]  # Shape: (Batch, Num_Heads, Seq_Len, Seq_Len)        
         num_visual_tokens = N
-        image_attn = avg_attn[:, -1, :num_visual_tokens] # (Batch, N)
+        text_to_image_attn = last_attn[:, :, num_visual_tokens:, :num_visual_tokens]
+        avg_attn = text_to_image_attn.mean(dim=1).mean(dim=1)
         
         side_len = int(num_visual_tokens ** 0.5)
         
         if side_len * side_len != num_visual_tokens:
-            image_attn = image_attn[:, 1:]
+            avg_attn = avg_attn[:, 1:]
         
-        attn_map_2d = image_attn.view(side_len, side_len)
+        attn_map_2d = avg_attn.view(-1, side_len, side_len)
         
         result["attentions"] = attn_map_2d
 
