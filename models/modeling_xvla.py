@@ -303,7 +303,7 @@ class XVLA(PreTrainedModel):
                 steps = int(payload.get("steps", 10))
                 
                 # get tuple return
-                action_out, attn_out = self.generate_actions(**inputs, steps=steps, return_attention=True)
+                action_out, attn_out = self.generate_actions(**inputs, steps=steps)
 
                 return JSONResponse({
                     "action": action_out.squeeze(0).float().cpu().numpy().tolist(),
