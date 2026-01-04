@@ -99,6 +99,7 @@ class XVLA(PreTrainedModel):
         input_ids: torch.LongTensor,        # [B, L]
         pixel_values: torch.FloatTensor,    # [B, V, C, H, W]
         image_mask: torch.Tensor,           # [B, V] (bool or 0/1)
+        output_attentions: bool = False,    # add param for attention map
     ) -> Dict[str, torch.Tensor]:
         """
         Encode text + multi-view images via Florence2 encoder.
@@ -129,14 +130,35 @@ class XVLA(PreTrainedModel):
             inputs_embeds,         # [B, L, D]
         )
 
-        enc_out = self.vlm.language_model.model.encoder(
+        # enc_out = self.vlm.language_model.model.encoder(
+        #     attention_mask=attention_mask,
+        #     inputs_embeds=merged_embeds,
+        # )[0]  # [B, T_enc, D]
+        
+        # aux_visual_inputs = image_features[:, 1:].reshape(B, -1, D)  # remaining views flattened
+        # return {"vlm_features": enc_out, "aux_visual_inputs": aux_visual_inputs}
+        
+        # -------- edit for attention map start -------------
+        enc_out_obj = self.vlm.language_model.model.encoder(
             attention_mask=attention_mask,
             inputs_embeds=merged_embeds,
-        )[0]  # [B, T_enc, D]
+            output_attentions=output_attentions,
+            return_dict=True
+        )
+        enc_out = enc_out_obj.last_hidden_state
+        
+        result = {"vlm_features": enc_out, "aux_visual_inputs": aux_visual_inputs}
 
-        aux_visual_inputs = image_features[:, 1:].reshape(B, -1, D)  # remaining views flattened
-        return {"vlm_features": enc_out, "aux_visual_inputs": aux_visual_inputs}
+        if output_attentions and enc_out_obj.attentions is not None:
+            # Shape: (Batch, Num_Heads, Seq_Len, Seq_Len)
+            last_attn = enc_out_obj.attentions[-1]
+            
+            # avg: (Batch, Seq_Len, Seq_Len)
+            avg_attn = last_attn.mean(dim=1) 
+            
+            result["attentions"] = avg_attn
 
+        return result
     # ================================= training =================================
     def forward(
         self,
@@ -180,13 +202,18 @@ class XVLA(PreTrainedModel):
         domain_id: torch.LongTensor,
         proprio: torch.Tensor,
         steps: int = 10,
+        return_attention: bool = False, # add param for attention map
     ) -> torch.Tensor:
         """
         Iterative denoising (linear schedule).
         Applies action_space.postprocess at the end (e.g., sigmoid on gripper).
         """
         self.eval()
-        enc = self.forward_vlm(input_ids, image_input, image_mask)
+        enc = self.forward_vlm(input_ids, image_input, image_mask, output_attentions=return_attention)
+        
+        attn_map = None
+        if "attentions" in enc:
+            attn_map = enc.pop("attentions")
 
         B = input_ids.shape[0]
         D = self.action_space.dim_action
@@ -206,7 +233,9 @@ class XVLA(PreTrainedModel):
                 t=t,
                 **enc,
             )
-        return self.action_space.postprocess(action)
+        
+        final_action = self.action_space.postprocess(action)
+        return final_action, attn_map
 
     # =============================== FastAPI service =============================
     def _build_app(self, processor):
@@ -269,8 +298,14 @@ class XVLA(PreTrainedModel):
 
                 # Inference
                 steps = int(payload.get("steps", 10))
-                action = self.generate_actions(**inputs, steps=steps).squeeze(0).float().cpu().numpy()
-                return JSONResponse({"action": action.tolist()})
+                
+                # get tuple return
+                action_out, attn_out = self.generate_actions(**inputs, steps=steps, return_attention=True)
+
+                return JSONResponse({
+                    "action": action_out.squeeze(0).float().cpu().numpy().tolist(),
+                    "attn_map": attn_out.float().cpu().numpy().tolist()
+                })
 
             except Exception:
                 logging.error(traceback.format_exc())

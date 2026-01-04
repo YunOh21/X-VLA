@@ -22,6 +22,8 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
+import cv2
+
 def quat_to_rotate6d(q: np.ndarray, scalar_first = False) -> np.ndarray:
     return R.from_quat(q, scalar_first = scalar_first).as_matrix()[..., :, :2].reshape(q.shape[:-1] + (6,))
 
@@ -52,7 +54,7 @@ class ClientModel():
                  port,
                  control_mode = 'ee',
                  episode_config = None):
-
+        
         self.url = f"http://{host}:{port}/act"
         assert control_mode in ['ee', 'joint']
         self.control_mode = control_mode
@@ -82,9 +84,64 @@ class ClientModel():
         #     raise RuntimeError(f"Policy server request failed: {e}") from e
 
         action = np.array(data["action"])  # shape (T, 10) expected: [pos3, rot6d, grip1]
+        atten_map = np.array(data["attn_map"])
         if action.ndim != 2 or action.shape[1] < 10:
             raise RuntimeError(f"Unexpected action shape from server: {action.shape}")
-        return action
+        return action, attn_map
+    
+    def save_attention_overlay(self, image_rgb, attn_list, step_idx):
+        if attn_list is None:
+            return
+
+        save_dir = "attention_logs"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        attn = np.array(attn_list)
+        seq_len = len(attn)
+        side = int(np.sqrt(seq_len))
+
+        if side * side != seq_len:
+            target_dim = 16 
+            if seq_len >= target_dim**2:
+                attn = attn[-(target_dim**2):]
+                side = target_dim
+            else:
+                target_dim = 14
+                if seq_len >= target_dim**2:
+                     attn = attn[-(target_dim**2):]
+                     side = target_dim
+
+        try:
+            attn_map = attn.reshape(side, side)
+        except:
+            print(f"[Skip] attention map size unmatch: {seq_len}")
+            return
+
+        # 이미지 크기에 맞춰 확대 (Bicubic Interpolation)
+        h, w = image_rgb.shape[:2]
+        attn_resized = cv2.resize(attn_map, (w, h), interpolation=cv2.INTER_CUBIC)
+
+        # 컬러맵 적용 (파란색: 낮음, 빨간색: 높음)
+        # 정규화 (0~1)
+        attn_norm = (attn_resized - attn_resized.min()) / (attn_resized.max() - attn_resized.min() + 1e-8)
+        attn_uint8 = (attn_norm * 255).astype(np.uint8)
+        heatmap = cv2.applyColorMap(attn_uint8, cv2.COLORMAP_JET)
+
+        # 원본 이미지와 합성
+        # 입력이 0~1 Float라면 0~255 Uint8로 변환
+        if image_rgb.max() <= 1.0:
+            image_rgb = (image_rgb * 255).astype(np.uint8)
+        
+        # RGB -> BGR (OpenCV용)
+        img_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+        
+        # 합성 (원본 60% + 히트맵 40%)
+        overlay = cv2.addWeighted(img_bgr, 0.6, heatmap, 0.4, 0)
+
+        # 파일 저장
+        filename = f"{save_dir}/step_{step_idx:04d}.jpg"
+        cv2.imwrite(filename, overlay)
+        print(f"Saved: {filename}")
 
     def predict(self, obs, **kwargs):
 
@@ -111,28 +168,34 @@ class ClientModel():
             ee_pos -= np.array([0, -0.4, 0.78])
             ee_state = np.concatenate([ee_pos, ee_6d, gripper], axis=0)
             proprio = np.concatenate([ee_state, np.zeros_like(ee_state)], axis=0).copy()
+            
+            target_pos = [-0.00938768644869489, -0.20980599916902634, 0.75] # 버튼 표면보다 아래로 가까이 갈 것
 
-            # for prefix
-            target_entity = episode_config['target_entity']
-            target_pos = next(
-                comp["position"]
-                for comp in episode_config["components"]
-                if comp["name"] == target_entity
-            )
-
-            prefix = f"The target object is located at {target_pos}. Move near the target object. "            
+            prefix = ""
+            # prefix = (f"The target object is located at {target_pos}. "
+            #   + "Move near the target object. ")           
+            
+            suffix = " Press red button in front of the painting."
+            
+            language_instruction = prefix + obs['instruction'] + prefix
 
             query = {
                 "proprio": json_numpy.dumps(proprio),
-                "language_instruction": prefix + obs['instruction'],
+                "language_instruction": language_instruction,
                 "image0": json_numpy.dumps(main_view),
                 "image1": json_numpy.dumps(front_view),
                 "image2": json_numpy.dumps(wrist_view),
                 "domain_id": 8,
                 "steps": 10,
             }
+            
+            print(language_instruction)
 
-            action = self._post(query)
+            action, attn_map = self._post(query)
+            
+            if attn_list is not None:
+                step_count = len(self.action_plan)
+                self.save_attention_overlay(main_view, attn_list, step_count)
 
             target_eef = action[:, :3]
             target_euler = rotate6D_to_euler(action[:, 3:9])
