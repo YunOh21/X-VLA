@@ -216,3 +216,5 @@ runnings/*
 .mp4
 logs/
 .vscode/settings.json
+results/
+attention_logs/

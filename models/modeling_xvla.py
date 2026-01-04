@@ -99,7 +99,6 @@ class XVLA(PreTrainedModel):
         input_ids: torch.LongTensor,        # [B, L]
         pixel_values: torch.FloatTensor,    # [B, V, C, H, W]
         image_mask: torch.Tensor,           # [B, V] (bool or 0/1)
-        output_attentions: bool = False,    # add param for attention map
     ) -> Dict[str, torch.Tensor]:
         """
         Encode text + multi-view images via Florence2 encoder.
@@ -135,7 +134,7 @@ class XVLA(PreTrainedModel):
         #     inputs_embeds=merged_embeds,
         # )[0]  # [B, T_enc, D]
         
-        # aux_visual_inputs = image_features[:, 1:].reshape(B, -1, D)  # remaining views flattened
+        aux_visual_inputs = image_features[:, 1:].reshape(B, -1, D)  # remaining views flattened
         # return {"vlm_features": enc_out, "aux_visual_inputs": aux_visual_inputs}
         
         # -------- edit for attention map start -------------
@@ -149,14 +148,24 @@ class XVLA(PreTrainedModel):
         
         result = {"vlm_features": enc_out, "aux_visual_inputs": aux_visual_inputs}
 
-        if output_attentions and enc_out_obj.attentions is not None:
-            # Shape: (Batch, Num_Heads, Seq_Len, Seq_Len)
-            last_attn = enc_out_obj.attentions[-1]
-            
-            # avg: (Batch, Seq_Len, Seq_Len)
-            avg_attn = last_attn.mean(dim=1) 
-            
-            result["attentions"] = avg_attn
+        # attention
+        # Shape: (Batch, Num_Heads, Seq_Len, Seq_Len)
+        last_attn = enc_out_obj.attentions[-1]
+        
+        # avg: (Batch, Seq_Len, Seq_Len)
+        avg_attn = last_attn.mean(dim=1) 
+        
+        num_visual_tokens = N
+        image_attn = avg_attn[:, -1, :num_visual_tokens] # (Batch, N)
+        
+        side_len = int(num_visual_tokens ** 0.5)
+        
+        if side_len * side_len != num_visual_tokens:
+            image_attn = image_attn[:, 1:]
+        
+        attn_map_2d = image_attn.view(side_len, side_len)
+        
+        result["attentions"] = attn_map_2d
 
         return result
     # ================================= training =================================
@@ -202,14 +211,13 @@ class XVLA(PreTrainedModel):
         domain_id: torch.LongTensor,
         proprio: torch.Tensor,
         steps: int = 10,
-        return_attention: bool = False, # add param for attention map
     ) -> torch.Tensor:
         """
         Iterative denoising (linear schedule).
         Applies action_space.postprocess at the end (e.g., sigmoid on gripper).
         """
         self.eval()
-        enc = self.forward_vlm(input_ids, image_input, image_mask, output_attentions=return_attention)
+        enc = self.forward_vlm(input_ids, image_input, image_mask)
         
         attn_map = None
         if "attentions" in enc:

@@ -23,6 +23,7 @@ import numpy as np
 from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
 import cv2
+import datetime
 
 def quat_to_rotate6d(q: np.ndarray, scalar_first = False) -> np.ndarray:
     return R.from_quat(q, scalar_first = scalar_first).as_matrix()[..., :, :2].reshape(q.shape[:-1] + (6,))
@@ -84,20 +85,24 @@ class ClientModel():
         #     raise RuntimeError(f"Policy server request failed: {e}") from e
 
         action = np.array(data["action"])  # shape (T, 10) expected: [pos3, rot6d, grip1]
-        atten_map = np.array(data["attn_map"])
+        attn_map = np.array(data["attn_map"])
         if action.ndim != 2 or action.shape[1] < 10:
             raise RuntimeError(f"Unexpected action shape from server: {action.shape}")
         return action, attn_map
     
-    def save_attention_overlay(self, image_rgb, attn_list, step_idx):
-        if attn_list is None:
+    def save_attention_overlay(self, language_instruction, image_rgb, attn_map, step_idx):
+        if attn_map is None:
             return
 
         save_dir = "attention_logs"
         os.makedirs(save_dir, exist_ok=True)
         
-        attn = np.array(attn_list)
+        attn = np.array(attn_map).flatten()
+        print("--------- print attn start ------------")
+        print(attn)
+        print("--------- print attn end ------------")
         seq_len = len(attn)
+        print("seq_len: ", seq_len)
         side = int(np.sqrt(seq_len))
 
         if side * side != seq_len:
@@ -112,7 +117,7 @@ class ClientModel():
                      side = target_dim
 
         try:
-            attn_map = attn.reshape(side, side)
+            attn_map = attn.reshape(side, side).T
         except:
             print(f"[Skip] attention map size unmatch: {seq_len}")
             return
@@ -139,7 +144,8 @@ class ClientModel():
         overlay = cv2.addWeighted(img_bgr, 0.6, heatmap, 0.4, 0)
 
         # 파일 저장
-        filename = f"{save_dir}/step_{step_idx:04d}.jpg"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"{save_dir}/{language_instruction}_{timestamp}.jpg"
         cv2.imwrite(filename, overlay)
         print(f"Saved: {filename}")
 
@@ -193,9 +199,9 @@ class ClientModel():
 
             action, attn_map = self._post(query)
             
-            if attn_list is not None:
+            if attn_map is not None:
                 step_count = len(self.action_plan)
-                self.save_attention_overlay(main_view, attn_list, step_count)
+                self.save_attention_overlay(language_instruction, main_view, attn_map, step_count)
 
             target_eef = action[:, :3]
             target_euler = rotate6D_to_euler(action[:, 3:9])
