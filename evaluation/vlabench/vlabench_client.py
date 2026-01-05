@@ -174,45 +174,6 @@ class ClientModel():
             ee_pos -= np.array([0, -0.4, 0.78])
             ee_state = np.concatenate([ee_pos, ee_6d, gripper], axis=0)
             proprio = np.concatenate([ee_state, np.zeros_like(ee_state)], axis=0).copy()
-            
-            # target_pos = [-0.00938768644869489, -0.20980599916902634, 0.75] # 버튼 표면보다 아래로 가까이 갈 것
-
-            # prefix = ""
-            # # prefix = (f"The target object is located at {target_pos}. "
-            # #   + "Move near the target object. ")           
-            
-            # suffix = " Press red button in front of the painting: "
-            
-            # suffix2 = """
-            # @staticmethod
-            # def press(env, target_pos, target_quat=None, move_vector=[0, 0, 0.1], max_n_substep=100): #TODO move vector to determine the press direction
-            #     prepare_pos = target_pos + np.array(move_vector) if move_vector is not None else target_pos
-            #     observations, waypoints, _, _ = SkillLib.moveto(env, 
-            #                                                 prepare_pos, 
-            #                                                 target_quat,
-            #                                                 max_n_substep=max_n_substep)
-            #     # close gripper
-            #     qpos = np.array(env.robot.get_qpos(env.physics)).reshape(-1)
-            #     for i in range(10):
-            #         gripper_state = np.ones(2) * (0.04 - i/10 * 0.04)
-            #         action = np.concatenate([qpos, gripper_state])
-            #         timestep = env.step(action)
-            #         if timestep.last():
-            #             break
-            #         obs = env.get_observation()
-            #         observations.append(obs)
-            #         waypoints.append(np.concatenate([env.robot.get_end_effector_pos(env.physics),
-            #                                         quaternion_to_euler(env.robot.get_end_effector_quat(env.physics)),
-            #                                         gripper_state]))
-            #     new_obs, new_waypoints, stage_success, task_success = SkillLib.moveto(env, target_pos, target_quat, max_n_substep=max_n_substep)
-            #     observations.extend(new_obs)
-            #     waypoints.extend(new_waypoints)
-            #     assert len(observations) == len(waypoints), f"observations and waypoints should have the same length, {len(observations)} and {len(waypoints)}"
-            #     return observations, waypoints, stage_success, task_success
-            # """
-            
-            
-            # language_instruction = prefix + obs['instruction'] + suffix + suffix2
 
             query = {
                 "proprio": json_numpy.dumps(proprio),
@@ -225,6 +186,18 @@ class ClientModel():
             }
 
             action, attn_map = self._post(query)
+            
+            save_dir = "trajectory_logs"
+            os.makedirs(save_dir, exist_ok=True)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # 매 스텝마다 별도의 .npy 파일로 저장 (충돌 방지 및 실시간 확인용)
+            # 예: trajectory_logs/step_001.npy, step_002.npy ...
+            step_count = len(os.listdir(save_dir)) 
+            save_path = f"{save_dir}/step_{step_count:04d}_{obs['instruction']}.npy"
+
+            # numpy 바이너리로 저장
+            np.save(save_path, pred_path)
             
             if attn_map is not None:
                 step_count = len(self.action_plan)
