@@ -141,7 +141,7 @@ class XVLA(PreTrainedModel):
         enc_out_obj = self.vlm.language_model.model.encoder(
             attention_mask=attention_mask,
             inputs_embeds=merged_embeds,
-            output_attentions=output_attentions,
+            output_attentions=True,
             return_dict=True
         )
         enc_out = enc_out_obj.last_hidden_state

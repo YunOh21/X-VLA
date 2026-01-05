@@ -217,4 +217,4 @@ runnings/*
 logs/
 .vscode/settings.json
 results/
-attention_logs/
+attention_logs*/
