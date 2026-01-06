@@ -26,9 +26,40 @@ import cv2
 import datetime
 
 # ---- Visual Prompting Start ----
+from scipy.spatial.transform import Rotation as R
+
+def get_matrix_from_mujoco_config(pos_str, xyaxes_str):
+    pos = np.array([float(x) for x in pos_str.split()])
+    vals = [float(x) for x in xyaxes_str.split()]
+    
+    xaxis = np.array(vals[0:3])
+    yaxis = np.array(vals[3:6])
+    
+    # 정규화
+    xaxis /= np.linalg.norm(xaxis)
+    yaxis /= np.linalg.norm(yaxis)
+    zaxis = np.cross(xaxis, yaxis)
+    
+    # MuJoCo(Right, Up, Back) -> OpenCV(Right, Down, Forward) 좌표계 변환
+    R_mujoco = np.vstack([xaxis, yaxis, zaxis]).T
+    R_cv_correction = np.array([
+        [1,  0,  0],
+        [0, -1,  0],
+        [0,  0, -1]
+    ])
+    R_final = R_mujoco @ R_cv_correction
+    
+    # 4x4 행렬 구성 (Camera -> World)
+    cam_to_world = np.eye(4)
+    cam_to_world[:3, :3] = R_final
+    cam_to_world[:3, 3] = pos
+    
+    # World -> Camera (역행렬)
+    return np.linalg.inv(cam_to_world)
+
 def get_extrinsics_matrix(cam_pos, cam_quat):
     """
-    카메라의 Pose(World -> Camera)를 4x4 행렬로 변환합니다.
+    카메라의 Pose(World -> Camera)를 4x4 행렬로 변환
     cam_pos: [x, y, z]
     cam_quat: [w, x, y, z] or [x, y, z, w] (Scipy 포맷에 맞게 조정 필요)
     """
@@ -44,49 +75,32 @@ def get_extrinsics_matrix(cam_pos, cam_quat):
     world_to_cam = np.linalg.inv(cam_to_world)
     return world_to_cam
 
-def add_visual_prompt(image, ee_pos, camera_intrinsics, prompt_type="blue_dot"):
+# [수정] add_visual_prompt 함수 교체
+def add_visual_prompt(image, ee_pos, camera_intrinsics, extrinsic_matrix, prompt_type="blue_dot"):
     """
-    Add visual prompt to image
-    
-    Args:
-        image: RGB image (H, W, 3), range [0, 255] uint8
-        ee_pos: End-effector 3D position (x, y, z)
-        camera_intrinsics: Camera intrinsic matrix (3, 3)
-        prompt_type: "blue_dot", "cross", "circle"
-    
-    Returns:
-        prompted_image: Image with visual prompt (H, W, 3)
+    extrinsic_matrix: World -> Camera 4x4 행렬
     """
     img = image.copy()
     
-    # Extrinsics 계산
-    extrinsic_matrix = get_extrinsics_matrix(cam_pos, cam_quat)
-    
-    # 투영
+    # 이미 계산된 행렬을 사용해서 바로 투영
+    # project_3d_to_2d 함수는 기존에 있는 것을 그대로 사용 (단, 인자 순서 주의)
     ee_2d = project_3d_to_2d(ee_pos, camera_intrinsics, extrinsic_matrix)
     
-    # 카메라 시야 밖에 있거나 뒤에 있는 경우 그리지 않음
     if ee_2d is None:
         return img
     
     x, y = int(ee_2d[0]), int(ee_2d[1])
-    
-    # 이미지 범위 체크
     h, w = img.shape[:2]
+    
+    # 화면 밖 체크
     if not (0 <= x < w and 0 <= y < h):
         return img
     
     if prompt_type == "blue_dot":
-        cv2.circle(img, (x, y), radius=10, color=(0, 0, 255), thickness=-1)  # BGR
+        # 잘 보이게 빨간색 테두리 + 파란색 점
+        cv2.circle(img, (x, y), radius=7, color=(0, 0, 255), thickness=-1) # Red (BGR)
+        cv2.circle(img, (x, y), radius=9, color=(255, 255, 255), thickness=1) # White rim
         
-    elif prompt_type == "cross":
-        size = 15
-        cv2.line(img, (x-size, y), (x+size, y), color=(0, 0, 255), thickness=3)
-        cv2.line(img, (x, y-size), (x, y+size), color=(0, 0, 255), thickness=3)
-        
-    elif prompt_type == "circle":
-        cv2.circle(img, (x, y), radius=15, color=(0, 0, 255), thickness=3)
-    
     return img
 
 def project_3d_to_2d(point_3d, intrinsics, world_to_cam_pose):
@@ -179,6 +193,17 @@ class ClientModel():
         self.control_mode = control_mode
         self.name = 'hdp'
         self.episode_config = episode_config
+        
+        # load camera_config
+        try:
+            config_path = Path(os.environ["VLABENCH_ROOT"]) / "configs" / "camera" / "camera_config.json"
+            with open(config_path, "r") as f:
+                self.camera_db = json.load(f)
+            print(f"[Client] Camera config loaded successfully.")
+        except Exception as e:
+            print(f"[Error] Failed to load camera config: {e}")
+            self.camera_db = {}
+        
         self.reset()
         
     def reset(self):
@@ -290,7 +315,28 @@ class ClientModel():
             ee_pos, ee_quat, gripper = proprio[:3], proprio[3:7], proprio[7:8]
                         
             # ===== VISUAL PROMPTING 추가 =====
-            # Camera intrinsics (VLABench 설정에 맞게 조정)
+            cam_cfg = self.camera_db.get(obs['instruction'], None)
+            
+            if cam_cfg:
+                # 2. 행렬 계산 (helper 함수 사용)
+                extrinsic_matrix = get_matrix_from_mujoco_config(cam_cfg["pos"], cam_cfg["xyaxes"])
+                
+                # 3. Intrinsics (FOV 값도 json에 있으면 가져다 쓰기)
+                fovy = float(cam_cfg.get("fovy", 60))
+                K = get_camera_intrinsics(fov=fovy, img_width=480, img_height=480)
+
+                # 4. 점 찍기 (Main View)
+                # Wrist View는 카메라가 움직이므로 투영하면 안됨! (원본 유지 or 고정점)
+                main_view_prompted = add_visual_prompt(main_view, ee_pos, K, extrinsic_matrix, "blue_dot")
+                front_view_prompted = front_view.copy() # 필요하면 front_camera config도 가져와서 똑같이 적용
+                wrist_view_prompted = wrist_view.copy() # Wrist는 건드리지 않음
+            else:
+                # Config 로드 실패 시 원본 그대로 사용
+                main_view_prompted = main_view
+                front_view_prompted = front_view
+                wrist_view_prompted = wrist_view
+            
+            # Camera intrinsics
             K = get_camera_intrinsics(fov=60, img_width=480, img_height=480)
             
             # Add blue dot to images
