@@ -196,7 +196,7 @@ class ClientModel():
         
         # load camera_config
         try:
-            config_path = Path(os.environ["VLABENCH_ROOT"]) / "configs" / "camera" / "camera_config.json"
+            config_path = Path(os.environ["VLABENCH_ROOT"]) / os.environ["VLABENCH_ROOT"] / "configs" / "camera_config.json"
             with open(config_path, "r") as f:
                 self.camera_db = json.load(f)
             print(f"[Client] Camera config loaded successfully.")
@@ -335,14 +335,6 @@ class ClientModel():
                 main_view_prompted = main_view
                 front_view_prompted = front_view
                 wrist_view_prompted = wrist_view
-            
-            # Camera intrinsics
-            K = get_camera_intrinsics(fov=60, img_width=480, img_height=480)
-            
-            # Add blue dot to images
-            main_view_prompted = add_visual_prompt(main_view, ee_pos, K, "blue_dot")
-            front_view_prompted = add_visual_prompt(front_view, ee_pos, K, "blue_dot")
-            wrist_view_prompted = add_visual_prompt(wrist_view, ee_pos, K, "blue_dot")
             
             instruction_with_prompt = f"Your body is Franka robot. Blue dot is your end effector. {obs['instruction']}"
             # ===== END VISUAL PROMPTING =====
