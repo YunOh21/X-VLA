@@ -25,6 +25,85 @@ from typing import Deque, Dict, Iterable, List, Optional, Tuple
 import cv2
 import datetime
 
+# ---- Visual Prompting Start ----
+def add_visual_prompt(image, ee_pos, camera_intrinsics, prompt_type="blue_dot"):
+    """
+    Add visual prompt to image
+    
+    Args:
+        image: RGB image (H, W, 3), range [0, 255] uint8
+        ee_pos: End-effector 3D position (x, y, z)
+        camera_intrinsics: Camera intrinsic matrix (3, 3)
+        prompt_type: "blue_dot", "cross", "circle"
+    
+    Returns:
+        prompted_image: Image with visual prompt (H, W, 3)
+    """
+    img = image.copy()
+    
+    # 3D → 2D projection
+    ee_2d = project_3d_to_2d(ee_pos, camera_intrinsics)
+    x, y = int(ee_2d[0]), int(ee_2d[1])
+    
+    if prompt_type == "blue_dot":
+        # Blue dot
+        cv2.circle(img, (x, y), radius=10, color=(0, 0, 255), thickness=-1)  # BGR
+        
+    elif prompt_type == "cross":
+        # Cross
+        size = 15
+        cv2.line(img, (x-size, y), (x+size, y), color=(0, 0, 255), thickness=3)
+        cv2.line(img, (x, y-size), (x, y+size), color=(0, 0, 255), thickness=3)
+        
+    elif prompt_type == "circle":
+        # Circle
+        cv2.circle(img, (x, y), radius=15, color=(0, 0, 255), thickness=3)
+    
+    return img
+
+def project_3d_to_2d(point_3d, intrinsics):
+    """
+    Project 3D point to 2D image coordinates
+    
+    Args:
+        point_3d: (x, y, z) in camera frame
+        intrinsics: 3x3 camera intrinsic matrix
+    
+    Returns:
+        point_2d: (u, v) pixel coordinates
+    """
+    point_3d_homo = np.array([point_3d[0], point_3d[1], point_3d[2], 1.0])
+    
+    # Project
+    uv_homo = intrinsics @ point_3d[:3]
+    u = uv_homo[0] / uv_homo[2]
+    v = uv_homo[1] / uv_homo[2]
+    
+    return np.array([u, v])
+
+def get_camera_intrinsics(fov, img_width, img_height):
+    """
+    Get camera intrinsic matrix from FOV
+    
+    Args:
+        fov: Field of view in degrees
+        img_width, img_height: Image dimensions
+    
+    Returns:
+        K: 3x3 intrinsic matrix
+    """
+    focal_length = (img_width / 2) / np.tan(np.radians(fov / 2))
+    
+    K = np.array([
+        [focal_length, 0, img_width / 2],
+        [0, focal_length, img_height / 2],
+        [0, 0, 1]
+    ])
+    
+    return K
+
+# ---- Visual Prompting End ----
+
 def quat_to_rotate6d(q: np.ndarray, scalar_first = False) -> np.ndarray:
     return R.from_quat(q, scalar_first = scalar_first).as_matrix()[..., :, :2].reshape(q.shape[:-1] + (6,))
 
@@ -174,34 +253,63 @@ class ClientModel():
             ee_pos -= np.array([0, -0.4, 0.78])
             ee_state = np.concatenate([ee_pos, ee_6d, gripper], axis=0)
             proprio = np.concatenate([ee_state, np.zeros_like(ee_state)], axis=0).copy()
+            
+            # ===== VISUAL PROMPTING 추가 =====
+            # Camera intrinsics (VLABench 설정에 맞게 조정)
+            K = get_camera_intrinsics(fov=60, img_width=480, img_height=480)
+            
+            # Add blue dot to images
+            main_view_prompted = add_visual_prompt(main_view, ee_pos, K, "blue_dot")
+            front_view_prompted = add_visual_prompt(front_view, ee_pos, K, "blue_dot")
+            wrist_view_prompted = add_visual_prompt(wrist_view, ee_pos, K, "blue_dot")
+            
+            instruction_with_prompt = f"Your body is Franka robot. Blue dot is your end effector. {obs['instruction']}"
+            # ===== END VISUAL PROMPTING =====
+            
+            # ==== 전송 전 이미지 저장 ====
+            debug_dir = "debug_prompts"
+            os.makedirs(debug_dir, exist_ok=True)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+            def save_check_image(name, img_arr):
+                # 원본 배열 보존을 위해 copy
+                to_save = img_arr.copy()
+                
+                # 0~1 float라면 0~255 uint8로 변환
+                if to_save.dtype != np.uint8:
+                    if to_save.max() <= 1.0:
+                        to_save = (to_save * 255).astype(np.uint8)
+                    else:
+                        to_save = to_save.astype(np.uint8)
+                
+                # RGB -> BGR 변환 (OpenCV 저장을 위해)
+                to_save = cv2.cvtColor(to_save, cv2.COLOR_RGB2BGR)
+                
+                filename = f"{debug_dir}/{timestamp}_{obs['instruction']}_{name}.jpg"
+                cv2.imwrite(filename, to_save)
+                print(f"[DEBUG] Saved prompt image: {filename}")
+
+            # 변환된 이미지 3장 저장
+            save_check_image("main_view", main_view_prompted)
+            save_check_image("front_view", front_view_prompted)
+            save_check_image("wrist_view", wrist_view_prompted)
+            # =================================================================
 
             query = {
                 "proprio": json_numpy.dumps(proprio),
-                "language_instruction": obs['instruction'],
-                "image0": json_numpy.dumps(main_view),
-                "image1": json_numpy.dumps(front_view),
-                "image2": json_numpy.dumps(wrist_view),
+                # language instruction with visual prompt
+                "language_instruction": instruction_with_prompt,
+                # send images as prompted
+                "image0": json_numpy.dumps(main_view_prompted),
+                "image1": json_numpy.dumps(front_view_prompted),
+                "image2": json_numpy.dumps(wrist_view_prompted),
                 "domain_id": 8,
                 "steps": 10,
             }
 
             action, attn_map = self._post(query)
             
-            save_dir = "trajectory_logs"
-            os.makedirs(save_dir, exist_ok=True)
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            # 매 스텝마다 별도의 .npy 파일로 저장 (충돌 방지 및 실시간 확인용)
-            # 예: trajectory_logs/step_001.npy, step_002.npy ...
-            step_count = len(os.listdir(save_dir)) 
-            save_path = f"{save_dir}/step_{step_count:04d}_{obs['instruction']}.npy"
-
-            # numpy 바이너리로 저장
-            np.save(save_path, pred_path)
-            
-            if attn_map is not None:
-                step_count = len(self.action_plan)
-                self.save_attention_overlay(obs['instruction'], main_view, attn_map, step_count)
+            self.save_attention_overlay(obs['instruction'], main_view, attn_map, step_count)
 
             target_eef = action[:, :3]
             target_euler = rotate6D_to_euler(action[:, 3:9])
