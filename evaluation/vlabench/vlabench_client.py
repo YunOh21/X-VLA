@@ -169,7 +169,7 @@ class ClientModel():
             raise RuntimeError(f"Unexpected action shape from server: {action.shape}")
         return action, attn_map
     
-    def save_attention_overlay(self, language_instruction, image_rgb, attn_map, step_idx):
+    def save_attention_overlay(self, language_instruction, image_rgb, attn_map):
         if attn_map is None:
             return
 
@@ -310,7 +310,7 @@ class ClientModel():
 
             action, attn_map = self._post(query)
             
-            self.save_attention_overlay(obs['instruction'], main_view, attn_map, step_count)
+            self.save_attention_overlay(obs['instruction'], main_view, attn_map)
 
             target_eef = action[:, :3]
             target_euler = rotate6D_to_euler(action[:, 3:9])
