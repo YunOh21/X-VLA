@@ -26,6 +26,24 @@ import cv2
 import datetime
 
 # ---- Visual Prompting Start ----
+def get_extrinsics_matrix(cam_pos, cam_quat):
+    """
+    카메라의 Pose(World -> Camera)를 4x4 행렬로 변환합니다.
+    cam_pos: [x, y, z]
+    cam_quat: [w, x, y, z] or [x, y, z, w] (Scipy 포맷에 맞게 조정 필요)
+    """
+    # 1. Camera to World Matrix (카메라가 월드의 어디에 있는지)
+    rotation = R.from_quat(cam_quat).as_matrix() # 쿼터니언 순서 주의 (x,y,z,w) or (w,x,y,z)
+    
+    # 4x4 행렬 구성
+    cam_to_world = np.eye(4)
+    cam_to_world[:3, :3] = rotation
+    cam_to_world[:3, 3] = cam_pos
+    
+    # 2. World to Camera Matrix (월드 좌표를 카메라 기준으로 가져오기 위해 역행렬)
+    world_to_cam = np.linalg.inv(cam_to_world)
+    return world_to_cam
+
 def add_visual_prompt(image, ee_pos, camera_intrinsics, prompt_type="blue_dot"):
     """
     Add visual prompt to image
@@ -41,41 +59,62 @@ def add_visual_prompt(image, ee_pos, camera_intrinsics, prompt_type="blue_dot"):
     """
     img = image.copy()
     
-    # 3D → 2D projection
-    ee_2d = project_3d_to_2d(ee_pos, camera_intrinsics)
+    # Extrinsics 계산
+    extrinsic_matrix = get_extrinsics_matrix(cam_pos, cam_quat)
+    
+    # 투영
+    ee_2d = project_3d_to_2d(ee_pos, camera_intrinsics, extrinsic_matrix)
+    
+    # 카메라 시야 밖에 있거나 뒤에 있는 경우 그리지 않음
+    if ee_2d is None:
+        return img
+    
     x, y = int(ee_2d[0]), int(ee_2d[1])
     
+    # 이미지 범위 체크
+    h, w = img.shape[:2]
+    if not (0 <= x < w and 0 <= y < h):
+        return img
+    
     if prompt_type == "blue_dot":
-        # Blue dot
         cv2.circle(img, (x, y), radius=10, color=(0, 0, 255), thickness=-1)  # BGR
         
     elif prompt_type == "cross":
-        # Cross
         size = 15
         cv2.line(img, (x-size, y), (x+size, y), color=(0, 0, 255), thickness=3)
         cv2.line(img, (x, y-size), (x, y+size), color=(0, 0, 255), thickness=3)
         
     elif prompt_type == "circle":
-        # Circle
         cv2.circle(img, (x, y), radius=15, color=(0, 0, 255), thickness=3)
     
     return img
 
-def project_3d_to_2d(point_3d, intrinsics):
+def project_3d_to_2d(point_3d, intrinsics, world_to_cam_pose):
     """
-    Project 3D point to 2D image coordinates
-    
     Args:
-        point_3d: (x, y, z) in camera frame
-        intrinsics: 3x3 camera intrinsic matrix
-    
-    Returns:
-        point_2d: (u, v) pixel coordinates
+        point_3d: (x, y, z) 월드 좌표
+        intrinsics: 3x3 Camera Intrinsics
+        world_to_cam_pose: 4x4 Extrinsics Matrix (World -> Camera)
     """
+    # 1. Homogeneous 좌표로 변환 [x, y, z, 1]
     point_3d_homo = np.array([point_3d[0], point_3d[1], point_3d[2], 1.0])
     
-    # Project
-    uv_homo = intrinsics @ point_3d[:3]
+    # 2. World 좌표 -> Camera 좌표 변환
+    point_cam = world_to_cam_pose @ point_3d_homo
+    
+    # 3. 좌표계 보정 (MuJoCo/OpenGL -> OpenCV)
+    # MuJoCo는 -Z가 전방, +Y가 위쪽 / OpenCV는 +Z가 전방, +Y가 아래쪽
+    # 따라서 Y축과 Z축을 뒤집어야 합니다.
+    # (카메라 행렬 자체에 이 변환이 포함되어 있지 않다면 수동으로 수행)
+    point_cam[1] *= -1 
+    point_cam[2] *= -1 
+
+    # Z값(깊이)이 0보다 작으면(카메라 뒤에 있으면) 투영하지 않음
+    if point_cam[2] <= 0:
+        return None 
+
+    # 4. Camera 좌표 -> Image 픽셀 (Intrinsics 적용)
+    uv_homo = intrinsics @ point_cam[:3]
     u = uv_homo[0] / uv_homo[2]
     v = uv_homo[1] / uv_homo[2]
     
