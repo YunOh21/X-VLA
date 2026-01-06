@@ -249,11 +249,7 @@ class ClientModel():
             # proprio
             proprio = obs['ee_state'] # np.ndarray with shape (1, 8)
             ee_pos, ee_quat, gripper = proprio[:3], proprio[3:7], proprio[7:8]
-            ee_6d = np.array(quat_to_rotate6d(ee_quat))
-            ee_pos -= np.array([0, -0.4, 0.78])
-            ee_state = np.concatenate([ee_pos, ee_6d, gripper], axis=0)
-            proprio = np.concatenate([ee_state, np.zeros_like(ee_state)], axis=0).copy()
-            
+                        
             # ===== VISUAL PROMPTING 추가 =====
             # Camera intrinsics (VLABench 설정에 맞게 조정)
             K = get_camera_intrinsics(fov=60, img_width=480, img_height=480)
@@ -266,8 +262,13 @@ class ClientModel():
             instruction_with_prompt = f"Your body is Franka robot. Blue dot is your end effector. {obs['instruction']}"
             # ===== END VISUAL PROMPTING =====
             
+            ee_6d = np.array(quat_to_rotate6d(ee_quat))
+            ee_pos -= np.array([0, -0.4, 0.78])
+            ee_state = np.concatenate([ee_pos, ee_6d, gripper], axis=0)
+            proprio = np.concatenate([ee_state, np.zeros_like(ee_state)], axis=0).copy()
+            
             # ==== 전송 전 이미지 저장 ====
-            debug_dir = "debug_prompts"
+            debug_dir = "debug_prompts_logs"
             os.makedirs(debug_dir, exist_ok=True)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
