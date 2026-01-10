@@ -82,7 +82,7 @@ def get_extrinsics_matrix(cam_pos, cam_quat):
     world_to_cam = np.linalg.inv(cam_to_world)
     return world_to_cam
 
-def add_visual_prompt(image, ee_pos, camera_intrinsics, extrinsic_matrix, prompt_type="blue_dot"):
+def add_visual_prompt(image, ee_pos, camera_intrinsics, extrinsic_matrix, gripper_state):
     """
     extrinsic_matrix: World -> Camera 4x4 행렬
     """
@@ -100,9 +100,16 @@ def add_visual_prompt(image, ee_pos, camera_intrinsics, extrinsic_matrix, prompt
     if not (0 <= x < w and 0 <= y < h):
         return img
     
-    if prompt_type == "blue_dot":
-        cv2.circle(img, (x, y), radius=7, color=(0, 0, 255), thickness=-1) # Red (BGR)
-        cv2.circle(img, (x, y), radius=9, color=(255, 255, 255), thickness=1) # White rim
+    is_open = gripper_state > 0.04 # 보통 Robosuite에서 닫히면 0에 가까움
+    
+    if is_open:
+        # Open: Red (opencv)
+        cv2.circle(img, (x, y), radius=7, color=(0, 0, 255), thickness=-1) 
+        cv2.circle(img, (x, y), radius=8, color=(255, 255, 255), thickness=1)
+    else:
+        # Closed: Blue (opencv)
+        cv2.circle(img, (x, y), radius=7, color=(255, 0, 0), thickness=-1) 
+        cv2.circle(img, (x, y), radius=8, color=(255, 255, 255), thickness=1)
         
     return img
 
@@ -303,13 +310,20 @@ class ClientModel():
             # 행렬 계산 (새로운 helper 함수 사용)
             # World -> Camera Extrinsic Matrix directly computed
             extrinsic_matrix = get_matrix_from_mujoco_config(pos, xyaxes)
-            
             K = get_camera_intrinsics(fov=fovy, img_width=480, img_height=480)
 
+            current_gripper_val = float(gripper[0])
+
             # 점 찍기
-            front_view_prompted = add_visual_prompt(front_view, ee_pos, K, extrinsic_matrix, "blue_dot")
+            front_view_prompted = add_visual_prompt(front_view, ee_pos, K, extrinsic_matrix, gripper_state=current_gripper_val)
             
-            instruction_with_prompt = f"Your body is Franka robot. Blue dot is your end effector. {obs['instruction']}"
+            instruction_with_prompt = f"""
+            Your body is Franka robot.
+            Blue dot shows your gripper is open.
+            Green dot shows your gripper is closed.
+            {obs['instruction']}
+            """
+
             # ===== END VISUAL PROMPTING =====
             
             ee_6d = np.array(quat_to_rotate6d(ee_quat))
