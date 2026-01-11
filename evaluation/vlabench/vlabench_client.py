@@ -453,6 +453,16 @@ def evaluate(args):
         with open(os.path.join("./VLABench/VLABench", "configs/evaluation/tracks", f"{eval_track}.json"), "r") as f:
             episode_config = json.load(f)
             tasks = list(episode_config.keys())
+            # If running track 1 or 2, limit to selected task subset
+            if eval_track in ("track_1_in_distribution", "track_2_cross_category"):
+                allowed = {"select_fruit", "insert_flower"}
+                filtered = [t for t in tasks if t in allowed]
+                if not filtered:
+                    # fallback to original tasks if filter removed all
+                    print(f"[vlabench_client] Warning: no tasks matched filter for {eval_track}, running original task set.")
+                else:
+                    print(f"[vlabench_client] Running filtered tasks for {eval_track}: {filtered}")
+                    tasks = filtered
 
         assert isinstance(tasks, list)
 
