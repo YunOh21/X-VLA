@@ -170,11 +170,32 @@ def get_camera_intrinsics(fov, img_width, img_height):
 
 # ---- Visual Prompting End ----
 
-def get_tcp_position(ee_pos, ee_quat, offset_dist=0.15):
-    rot_mat = R.from_quat(ee_quat).as_matrix()
-    offset_vec = np.array([0, 0, 1]) * offset_dist
-    tcp_pos = ee_pos + (rot_mat @ offset_vec)
-    return tcp_pos
+def draw_trajectory(image, position_history, intrinsics, extrinsic_matrix):
+    """
+    저장된 3D 위치들의 리스트(position_history) 그리기
+    """
+    img = image.copy()
+    if len(position_history) < 2:
+        return img
+
+    # 3D 점들을 2D 픽셀 좌표로 변환
+    points_2d = []
+    for pos in position_history:
+        uv = project_3d_to_2d(pos, intrinsics, extrinsic_matrix)
+        if uv is not None:
+            points_2d.append(tuple(uv.astype(int)))
+        else:
+            points_2d.append(None) # 화면 밖이거나 뒤쪽인 경우
+
+    # 선 그리기 (과거 -> 현재)
+    for i in range(len(points_2d) - 1):
+        pt1 = points_2d[i]
+        pt2 = points_2d[i+1]
+        
+        if pt1 is not None and pt2 is not None:
+            cv2.line(img, pt1, pt2, color=(0, 255, 0), thickness=2)
+            
+    return img
 
 def quat_to_rotate6d(q: np.ndarray, scalar_first = False) -> np.ndarray:
     return R.from_quat(q, scalar_first = scalar_first).as_matrix()[..., :, :2].reshape(q.shape[:-1] + (6,))
@@ -210,16 +231,11 @@ class ClientModel():
         assert control_mode in ['ee', 'joint']
         self.control_mode = control_mode
         self.name = 'hdp'
-        
         self.reset()
         
     def reset(self):
-        """
-        This is called
-        """
-        # currently, we dont use historical observation, so we dont need this fc
-        
         self.action_plan = collections.deque()
+        self.ee_history = []
         return None
     
     def _post(self, payload: Dict) -> np.ndarray:
@@ -290,7 +306,7 @@ class ClientModel():
         Returns:
             action: (np.array) predicted action
         """
-        print(obs.keys())
+        # print(obs.keys())
 
         if not self.action_plan:
             multiview = obs['rgb']  # # np.ndarray with shape (4, 480, 480, 3)
@@ -302,6 +318,8 @@ class ClientModel():
             # proprio
             proprio = obs['ee_state'] # np.ndarray with shape (1, 8)
             ee_pos, ee_quat, gripper = proprio[:3], proprio[3:7], proprio[7:8]
+
+            self.ee_history.append(ee_pos.copy())
                         
             # ===== VISUAL PROMPTING 추가 =====
             # from camera.xml
@@ -318,12 +336,21 @@ class ClientModel():
 
             # 점 찍기
             front_view_prompted = add_visual_prompt(front_view, ee_pos, K, extrinsic_matrix, gripper_state=current_gripper_val)
-            
+            front_view_prompted = draw_trajectory(front_view_prompted, self.ee_history, K, extrinsic_matrix)
+
             instruction_with_prompt = f"""
-            Your body is Franka robot.
-            Blue dot shows your gripper is open.
-            Green dot shows your gripper is closed.
+            # VISUALS
+            - RED DOT: Hand Open (Start/End)
+            - BLUE DOT: Hand Closed
+            - GREEN LINE: Hand Trajectory
+
+            # TASK
             {obs['instruction']}
+
+            # ACTION RULES
+            1. GRAB the object (Dot turns BLUE).
+            2. MOVE to the target container.
+            3. **WINNING CONDITION**: The task is ONLY finished when you **OPEN the gripper (Dot turns RED)** above the target.
             """
 
             # ===== END VISUAL PROMPTING =====
@@ -397,7 +424,6 @@ def get_args():
     parser.add_argument('--n-episode', default=10, type=int, help="The number of episodes to evaluate for a task")
     parser.add_argument('--visulization', action="store_true", default=True, help="Whether to save the visualized episodes")
     parser.add_argument('--metrics', nargs='+', default=["success_rate"], choices=["success_rate", "intention_score", "progress_score"], help="The metrics to evaluate")
-    
     parser.add_argument("--host", default='0.0.0.0', help="Your client host ip")
     parser.add_argument("--port", default=8000, type=int, help="Your client port")
     parser.add_argument("--eval_log_dir", default='results/test', type=str, help="Where to log the evaluation results.")
