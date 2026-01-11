@@ -290,6 +290,8 @@ class ClientModel():
         Returns:
             action: (np.array) predicted action
         """
+        print(obs.keys())
+
         if not self.action_plan:
             multiview = obs['rgb']  # # np.ndarray with shape (4, 480, 480, 3)
             
@@ -411,6 +413,8 @@ def evaluate(args):
         with open(os.path.join("./VLABench/VLABench", "configs/evaluation/tracks", f"{eval_track}.json"), "r") as f:
             episode_config = json.load(f)
             tasks = list(episode_config.keys())
+            allowed = {"select_fruit", "insert_flower"}
+            tasks = [t for t in tasks if t in allowed]
 
         assert isinstance(tasks, list)
 
