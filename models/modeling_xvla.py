@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from PIL import Image
+from PIL import Image, ImageDraw
 import uvicorn
 import json_numpy
 import cv2
@@ -56,8 +56,9 @@ class XVLA(PreTrainedModel):
         self.num_actions: int = config.num_actions
         self.use_proprio: bool = config.use_proprio
         self.action_mode: str = config.action_mode.lower()
-        # Action space (dimensions + hooks)
-        self.action_space = build_action_space(config.action_mode.lower())
+        # Action space (dimensions + hooks). Pass through position_scale from config.
+        position_scale = getattr(config, "position_scale", 1.0)
+        self.action_space = build_action_space(config.action_mode.lower(), position_scale=position_scale)
         dim_action = self.action_space.dim_action
         dim_proprio = getattr(self.action_space, "dim_proprio", dim_action)
 
@@ -304,10 +305,82 @@ class XVLA(PreTrainedModel):
                 
                 # get tuple return
                 action_out, attn_out = self.generate_actions(**inputs, steps=steps)
+                # If client provided camera intrinsics/extrinsics, use them for accurate projection.
+                out_overlay = None
+                try:
+                    intrinsics = None
+                    extrinsics = None
+                    if "camera_intrinsics" in payload:
+                        intrinsics = json_numpy.loads(payload["camera_intrinsics"])  # 3x3
+                    if "camera_extrinsics" in payload:
+                        extrinsics = json_numpy.loads(payload["camera_extrinsics"])  # 4x4 (world->camera)
+
+                    img0 = images[0].convert("RGBA")
+                    W, H = img0.size
+
+                    traj_pts = []
+                    traj = action_out.squeeze(0).float().cpu().numpy()  # [T, D]
+                    if intrinsics is not None and extrinsics is not None and traj.ndim == 2 and traj.shape[1] >= 3:
+                        # Project each 3D world position to pixel coordinates using provided matrices
+                        for p in traj[:, :3]:
+                            p_h = np.array([p[0], p[1], p[2], 1.0])
+                            pc = extrinsics @ p_h
+                            if pc[2] <= 0:
+                                traj_pts.append(None)
+                                continue
+                            uv = intrinsics @ pc[:3]
+                            u = float(uv[0] / uv[2])
+                            v = float(uv[1] / uv[2])
+                            # clamp
+                            if not (np.isfinite(u) and np.isfinite(v)):
+                                traj_pts.append(None)
+                            else:
+                                traj_pts.append((int(u), int(v)))
+                    else:
+                        traj_pts = []
+
+                    overlay = Image.new("RGBA", img0.size)
+                    draw = ImageDraw.Draw(overlay)
+
+                    # Draw trajectory (connect valid consecutive points)
+                    valid_pts = [pt for pt in traj_pts if pt is not None]
+                    if len(valid_pts) >= 2:
+                        draw.line(valid_pts, fill=(255, 0, 0, 200), width=3)
+                        for p in valid_pts:
+                            draw.ellipse((p[0]-3, p[1]-3, p[0]+3, p[1]+3), fill=(255,255,255,200))
+
+                    # Current gripper position (first valid point)
+                    if len(valid_pts) >= 1:
+                        p0 = valid_pts[0]
+                        draw.ellipse((p0[0]-6, p0[1]-6, p0[0]+6, p0[1]+6), outline=(0,255,0,255), width=3)
+
+                    # Attention map overlay if available
+                    if attn_out is not None:
+                        try:
+                            att = attn_out.float().cpu().numpy()
+                            if att.ndim == 3:
+                                att = att[0]
+                            a_min, a_max = att.min(), att.max()
+                            if a_max - a_min > 1e-6:
+                                att_norm = (att - a_min) / (a_max - a_min)
+                                att_img = (255 * att_norm).astype(np.uint8)
+                                att_pil = Image.fromarray(att_img).convert("L").resize((W, H))
+                                att_rgba = Image.new("RGBA", att_pil.size)
+                                att_rgba.paste(Image.new("RGBA", att_pil.size, (255,0,0,120)), mask=att_pil)
+                                overlay = Image.alpha_composite(overlay, att_rgba)
+                        except Exception:
+                            pass
+
+                    out_img = Image.alpha_composite(img0, overlay).convert("RGB")
+                    out_arr = np.asarray(out_img)
+                    out_overlay = json_numpy.dumps(out_arr)
+                except Exception:
+                    out_overlay = None
 
                 return JSONResponse({
                     "action": action_out.squeeze(0).float().cpu().numpy().tolist(),
-                    "attn_map": attn_out.float().cpu().numpy().tolist()
+                    "attn_map": attn_out.float().cpu().numpy().tolist() if attn_out is not None else None,
+                    "overlay": out_overlay,
                 })
 
             except Exception:

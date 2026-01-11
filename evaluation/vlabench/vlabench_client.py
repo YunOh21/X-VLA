@@ -228,16 +228,44 @@ class ClientModel():
         data = resp.json()
         
         action = np.array(data["action"])  # shape (T, 10) expected: [pos3, rot6d, grip1]
-        attn_map = np.array(data["attn_map"])
+        attn_map = np.array(data.get("attn_map")) if data.get("attn_map") is not None else None
+
+        # If server returned an overlay image, decode and save it for debugging
+        overlay_img = None
+        if data.get("overlay") is not None:
+            try:
+                overlay_arr = json_numpy.loads(data["overlay"])
+                # Ensure uint8
+                if overlay_arr.dtype != np.uint8:
+                    if overlay_arr.max() <= 1.0:
+                        overlay_arr = (overlay_arr * 255).astype(np.uint8)
+                    else:
+                        overlay_arr = overlay_arr.astype(np.uint8)
+                # Save overlay
+                    save_dir = os.path.join("logs", "prompt")
+                os.makedirs(save_dir, exist_ok=True)
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                filename = f"{save_dir}/{timestamp}_overlay.jpg"
+                # overlay_arr is RGB -> convert to BGR for cv2
+                try:
+                    bgr = cv2.cvtColor(overlay_arr, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(filename, bgr)
+                except Exception:
+                    # fallback: save with PIL
+                    Image.fromarray(overlay_arr).save(filename)
+                overlay_img = overlay_arr
+            except Exception:
+                overlay_img = None
+
         if action.ndim != 2 or action.shape[1] < 10:
             raise RuntimeError(f"Unexpected action shape from server: {action.shape}")
-        return action, attn_map
+        return action, attn_map, overlay_img
     
     def save_attention_overlay(self, language_instruction, image_rgb, attn_map):
         if attn_map is None:
             return
 
-        save_dir = "attention_logs"
+        save_dir = os.path.join("logs", "attention")
         os.makedirs(save_dir, exist_ok=True)
         
         attn = np.array(attn_map).flatten()
@@ -332,7 +360,7 @@ class ClientModel():
             proprio = np.concatenate([ee_state, np.zeros_like(ee_state)], axis=0).copy()
             
             # ==== 전송 전 이미지 저장 ====
-            debug_dir = "debug_prompts_logs"
+            debug_dir = os.path.join("logs", "prompt")
             os.makedirs(debug_dir, exist_ok=True)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
@@ -362,10 +390,24 @@ class ClientModel():
                 "domain_id": 8,
                 "steps": 10,
             }
+            # Include camera parameters so server can perform accurate projection
+            query["camera_intrinsics"] = json_numpy.dumps(K)
+            query["camera_extrinsics"] = json_numpy.dumps(extrinsic_matrix)
 
-            action, attn_map = self._post(query)
-            
+            action, attn_map, overlay_img = self._post(query)
+
             self.save_attention_overlay(obs['instruction'], main_view, attn_map)
+            if overlay_img is not None:
+                # also save the overlay next to other debug images
+                debug_dir = "debug_prompts_logs"
+                os.makedirs(debug_dir, exist_ok=True)
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                overlay_filename = f"{debug_dir}/{timestamp}_{obs['instruction']}_server_overlay.jpg"
+                try:
+                    bgr = cv2.cvtColor(overlay_img, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(overlay_filename, bgr)
+                except Exception:
+                    Image.fromarray(overlay_img).save(overlay_filename)
 
             target_eef = action[:, :3]
             target_euler = rotate6D_to_euler(action[:, 3:9])
