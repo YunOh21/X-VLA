@@ -121,14 +121,10 @@ class EE6DActionSpace(BaseActionSpace):
     ROT_IDX_1 = (3, 4, 5, 6, 7, 8)
     ROT_IDX_2 = (13, 14, 15, 16, 17, 18)
 
-    def __init__(self, position_scale: float = 1.0, **kwargs):
+    def __init__(self):
         super().__init__()
-        # Use SmoothL1Loss (Huber) for position/rotation to improve robustness
-        self.pos_loss_fn = nn.SmoothL1Loss()
-        self.rot_loss_fn = nn.SmoothL1Loss()
+        self.mse = nn.MSELoss()
         self.bce = nn.BCEWithLogitsLoss()
-        # Position scaling (world units -> normalized). Can be passed via constructor.
-        self.position_scale = float(position_scale)
 
     def compute_loss(self, pred, target):
         assert pred.shape == target.shape, "pred/target shapes must match"
@@ -141,14 +137,14 @@ class EE6DActionSpace(BaseActionSpace):
 
         # XYZ position
         pos_loss = (
-            self.pos_loss_fn(pred[:, :, self.POS_IDX_1], target[:, :, self.POS_IDX_1]) +
-            self.pos_loss_fn(pred[:, :, self.POS_IDX_2], target[:, :, self.POS_IDX_2])
+            self.mse(pred[:, :, self.POS_IDX_1], target[:, :, self.POS_IDX_1]) +
+            self.mse(pred[:, :, self.POS_IDX_2], target[:, :, self.POS_IDX_2])
         ) * self.XYZ_SCALE
 
         # Rotation 6D
         rot_loss = (
-            self.rot_loss_fn(pred[:, :, self.ROT_IDX_1], target[:, :, self.ROT_IDX_1]) +
-            self.rot_loss_fn(pred[:, :, self.ROT_IDX_2], target[:, :, self.ROT_IDX_2])
+            self.mse(pred[:, :, self.ROT_IDX_1], target[:, :, self.ROT_IDX_1]) +
+            self.mse(pred[:, :, self.ROT_IDX_2], target[:, :, self.ROT_IDX_2])
         ) * self.ROT_SCALE
 
         return {
@@ -158,39 +154,15 @@ class EE6DActionSpace(BaseActionSpace):
         }
 
     def preprocess(self, proprio, action, mode="train"):
-        """Normalize position channels and zero-out gripper channels in proprio/action.
-
-        Expected `action` shape: [B, T, D]. Normalization divides position channels
-        by `self.position_scale` so the model sees values in a stable range.
-        """
+        """Zero-out gripper channels in proprio/action."""
         proprio_m = proprio.clone()
         action_m = action.clone()
-
-        # Normalize position channels if position_scale != 1.0
-        if getattr(self, "position_scale", 1.0) != 1.0:
-            try:
-                action_m[..., self.POS_IDX_1] = action_m[..., self.POS_IDX_1] / self.position_scale
-                action_m[..., self.POS_IDX_2] = action_m[..., self.POS_IDX_2] / self.position_scale
-            except Exception:
-                # If indexing fails, skip normalization
-                pass
-
-        # Zero gripper channels
         proprio_m[..., self.gripper_idx] = 0.0
         action_m[..., self.gripper_idx] = 0.0
         return proprio_m, action_m
 
     def postprocess(self, action: torch.Tensor) -> torch.Tensor:
-        """Apply sigmoid to gripper logits and inverse-normalize position channels."""
-        # Inverse-normalize position channels first
-        if getattr(self, "position_scale", 1.0) != 1.0:
-            try:
-                action[..., self.POS_IDX_1] = action[..., self.POS_IDX_1] * self.position_scale
-                action[..., self.POS_IDX_2] = action[..., self.POS_IDX_2] * self.position_scale
-            except Exception:
-                pass
-
-        # Apply sigmoid to gripper logits
+        """Apply sigmoid to gripper logits."""
         if action.size(-1) > max(self.gripper_idx):
             action[..., self.gripper_idx] = torch.sigmoid(action[..., self.gripper_idx])
         return action
@@ -205,12 +177,10 @@ class JointActionSpace(BaseActionSpace):
     GRIPPER_SCALE = 0.1
     JOINTS_SCALE = 1.0
 
-    def __init__(self, position_scale: float = 1.0, **kwargs):
+    def __init__(self):
         super().__init__()
-        # Use SmoothL1Loss for joints to be robust to outliers
-        self.joints_loss_fn = nn.SmoothL1Loss()
+        self.mse = nn.MSELoss()
         self.bce = nn.BCEWithLogitsLoss()
-        self.position_scale = float(position_scale)
 
     def compute_loss(self, pred, target):
         assert pred.shape == target.shape
@@ -221,7 +191,7 @@ class JointActionSpace(BaseActionSpace):
         gripper_loss = sum(g_losses) / len(self.gripper_idx) * self.GRIPPER_SCALE
 
         joints_idx = tuple(i for i in range(D) if i not in set(self.gripper_idx))
-        joints_loss = self.joints_loss_fn(pred[:, :, joints_idx], target[:, :, joints_idx]) * self.JOINTS_SCALE
+        joints_loss = self.mse(pred[:, :, joints_idx], target[:, :, joints_idx]) * self.JOINTS_SCALE
 
         return {
             "joints_loss": joints_loss,
@@ -257,26 +227,23 @@ class AGIBOTEE6DActionSpace(BaseActionSpace):
     ROT_IDX_1 = (3, 4, 5, 6, 7, 8)
     ROT_IDX_2 = (13, 14, 15, 16, 17, 18)
 
-    def __init__(self, position_scale: float = 1.0, **kwargs):
+    def __init__(self):
         super().__init__()
-        # AGIBOT variant: use SmoothL1Loss instead of MSE for robustness
-        self.loss_fn = nn.SmoothL1Loss()
-        # Allow position scaling for AGIBOT variant as well
-        self.position_scale = float(position_scale)
+        self.mse = nn.MSELoss()
 
     def compute_loss(self, pred, target):
         assert pred.shape == target.shape
         B, T, D = pred.shape
         _ensure_indices_valid(D, self.gripper_idx, "gripper_idx")
 
-        gripper_loss = self.loss_fn(pred[:, :, self.gripper_idx], target[:, :, self.gripper_idx]) * self.GRIPPER_SCALE
+        gripper_loss = self.mse(pred[:, :, self.gripper_idx], target[:, :, self.gripper_idx]) * self.GRIPPER_SCALE
         pos_loss = (
-            self.loss_fn(pred[:, :, self.POS_IDX_1], target[:, :, self.POS_IDX_1]) +
-            self.loss_fn(pred[:, :, self.POS_IDX_2], target[:, :, self.POS_IDX_2])
+            self.mse(pred[:, :, self.POS_IDX_1], target[:, :, self.POS_IDX_1]) +
+            self.mse(pred[:, :, self.POS_IDX_2], target[:, :, self.POS_IDX_2])
         ) * self.XYZ_SCALE
         rot_loss = (
-            self.loss_fn(pred[:, :, self.ROT_IDX_1], target[:, :, self.ROT_IDX_1]) +
-            self.loss_fn(pred[:, :, self.ROT_IDX_2], target[:, :, self.ROT_IDX_2])
+            self.mse(pred[:, :, self.ROT_IDX_1], target[:, :, self.ROT_IDX_1]) +
+            self.mse(pred[:, :, self.ROT_IDX_2], target[:, :, self.ROT_IDX_2])
         ) * self.ROT_SCALE
 
         return {
@@ -286,28 +253,11 @@ class AGIBOTEE6DActionSpace(BaseActionSpace):
         }
 
     def preprocess(self, proprio, action, mode="train"):
-        """Apply position normalization if configured."""
-        if getattr(self, "position_scale", 1.0) == 1.0:
-            return proprio, action
-
-        proprio_m = proprio.clone()
-        action_m = action.clone()
-        try:
-            action_m[..., self.POS_IDX_1] = action_m[..., self.POS_IDX_1] / self.position_scale
-            action_m[..., self.POS_IDX_2] = action_m[..., self.POS_IDX_2] / self.position_scale
-        except Exception:
-            pass
-        return proprio_m, action_m
+        """No preprocessing applied in AGIBOT variant."""
+        return proprio, action
 
     def postprocess(self, action: torch.Tensor) -> torch.Tensor:
-        """Apply inverse normalization for position channels if configured."""
-        if getattr(self, "position_scale", 1.0) == 1.0:
-            return action
-        try:
-            action[..., self.POS_IDX_1] = action[..., self.POS_IDX_1] * self.position_scale
-            action[..., self.POS_IDX_2] = action[..., self.POS_IDX_2] * self.position_scale
-        except Exception:
-            pass
+        """AGIBOT does not postprocess."""
         return action
 
 

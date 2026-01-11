@@ -51,7 +51,6 @@ class XVLAConfig(PretrainedConfig):
         num_actions: int = 30,
         action_mode: str = "ee6d",
         use_proprio: bool = True,
-        position_scale: float = 1.0,
 
         **kwargs,
     ):
@@ -79,8 +78,6 @@ class XVLAConfig(PretrainedConfig):
         self.num_actions = num_actions
         self.action_mode = action_mode
         self.use_proprio = use_proprio
-        # Position scaling for action normalization (world units -> model units)
-        self.position_scale = position_scale
 
         # Initialize base HF config attributes (e.g. name_or_path)
         super().__init__(**kwargs)
@@ -95,5 +92,4 @@ class XVLAConfig(PretrainedConfig):
         """
         output = super().to_dict()
         output["florence_config"] = self.florence_config.to_dict()
-        output["position_scale"] = getattr(self, "position_scale", 1.0)
         return output
